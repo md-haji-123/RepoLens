@@ -7,7 +7,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from groq import Groq
 
-#  SETUP 
+# ==================== SETUP ====================
 load_dotenv()
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN")
@@ -27,7 +27,7 @@ LATEST_RESULT = {}
 LATEST_METRICS = {}
 LATEST_REPO_INFO = {}
 
-#  HELPERS 
+# ==================== HELPERS ====================
 def parse_repo_url(repo_url: str):
     parts = repo_url.rstrip("/").split("/")
     if len(parts) < 2:
@@ -61,21 +61,7 @@ def fetch_commits(owner, repo):
     r.raise_for_status()
     return r.json()
 
-# NEW HELPER: README SECTION ANALYZER
-def analyze_readme_sections(text: str):
-    text = text.lower()
-    return {
-        "overview": any(k in text for k in ["overview", "abstract", "introduction"]),
-        "setup": any(k in text for k in ["installation", "setup", "usage", "run"]),
-        "tech_stack": any(k in text for k in ["tech stack", "technologies", "built with"]),
-        "architecture": any(k in text for k in ["architecture", "system design", "workflow"]),
-        "examples": any(k in text for k in ["example", "sample output", "demo"]),
-        "limitations": any(k in text for k in ["limitations", "known issues"]),
-        "license": "license" in text,
-        "contributing": "contributing" in text
-    }
-
-# ANALYSIS 
+# ==================== ANALYSIS ====================
 def analyze_repository(repo_url):
     owner, repo = parse_repo_url(repo_url)
     files = walk_repo(owner, repo)
@@ -87,10 +73,7 @@ def analyze_repository(repo_url):
         "has_tests": False,
         "commit_count": 0,
         "file_structure": [],
-        "languages": {},
-        "readme_words": 0,
-        "readme_lines": 0,
-        "readme_sections": {}
+        "languages": {}
     }
 
     ext_to_lang = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".css": "CSS", ".html": "HTML"}
@@ -100,17 +83,8 @@ def analyze_repository(repo_url):
         name = item["name"]
         lname = name.lower()
 
-        # READ README CONTENT (NEW)
-        if lname.startswith("readme") and item.get("download_url"):
+        if lname.startswith("readme"):
             metrics["has_readme"] = True
-            try:
-                readme_text = fetch_file_content(item["download_url"])
-                metrics["readme_lines"] = len(readme_text.splitlines())
-                metrics["readme_words"] = len(readme_text.split())
-                metrics["readme_sections"] = analyze_readme_sections(readme_text)
-            except Exception:
-                pass
-
         if "test" in lname:
             metrics["has_tests"] = True
 
@@ -149,20 +123,11 @@ def analyze_repository(repo_url):
 
     return metrics
 
-# SCORING 
+# ==================== SCORING ====================
 def calculate_scores(metrics):
     avg_func_size = metrics["lines"] / max(metrics["functions"], 1)
     code_quality = 90 if avg_func_size < 30 else 60
-
-    # DOCUMENTATION SCORE FIXED (REAL)
-    documentation = (
-        95 if metrics["readme_words"] > 400 else
-        80 if metrics["readme_words"] > 200 else
-        60 if metrics["readme_words"] > 80 else
-        40 if metrics["has_readme"] else
-        20
-    )
-
+    documentation = 85 if metrics["has_readme"] else 35
     testing = 75 if metrics["has_tests"] else 30
     git_practices = min(metrics["commit_count"] * 5, 100)
     real_world = 75
@@ -177,7 +142,7 @@ def calculate_scores(metrics):
     ]
     return final_score, breakdown
 
-# AI HELPERS
+# ==================== AI HELPERS ====================
 def safe_json_from_ai(text):
     try:
         text = text.strip()
@@ -233,21 +198,18 @@ Provide a step-by-step roadmap to improve code quality, testing, and documentati
 CONTEXT:
 - Lines of code: {metrics['lines']}
 - Number of functions: {metrics['functions']}
-- README analysis:
-  Words: {metrics['readme_words']}
-  Sections present: {metrics['readme_sections']}
+- README present: {metrics['has_readme']}
 - Tests present: {metrics['has_tests']}
 - Commit count: {metrics['commit_count']}
 - Programming languages: {[l['name'] for l in metrics['languages']]}
 
 INSTRUCTIONS:
 1. Base all suggestions strictly on the given metrics.
-2. Only suggest missing README sections for documentation improvements.
-3. Provide 3 categories: short-term (1-7 days), mid-term (2-4 weeks), long-term (1-3 months).
-4. Each roadmap item must have:
+2. Provide 3 categories: short-term (1-7 days), mid-term (2-4 weeks), long-term (1-3 months).
+3. Each roadmap item must have:
    - title: short and clear
    - description: concise explanation
-5. Return output strictly in JSON.
+4. Return output strictly in JSON.
 
 OUTPUT FORMAT:
 {{
@@ -267,7 +229,8 @@ OUTPUT FORMAT:
         print("Groq roadmap error:", e)
         return {"short_term":[],"mid_term":[],"long_term":[]}
 
-# RISK PREDICTION 
+
+# ==================== RISK PREDICTION ====================
 def predict_risks(metrics):
     risks = {}
     risks["testing"] = "high" if not metrics["has_tests"] else "low"
@@ -278,7 +241,7 @@ def predict_risks(metrics):
     risks["overall_risk_score"] = int(overall)
     return risks
 
-#  ROUTES
+# ==================== ROUTES ====================
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     global LATEST_RESULT, LATEST_METRICS
@@ -318,6 +281,6 @@ def risks():
         return jsonify({"error":"No repository analyzed yet"}), 404
     return jsonify(predict_risks(LATEST_METRICS))
 
-#  RUN
+# ==================== RUN ====================
 if __name__ == "__main__":
     app.run(debug=True,port=5000)
