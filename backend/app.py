@@ -6,8 +6,10 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 from groq import Groq
+from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 
-# ==================== SETUP ====================
+# SETUP
 load_dotenv()
 
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
@@ -21,13 +23,16 @@ client = Groq(api_key=GROQ_API_KEY)
 app = Flask(__name__)
 CORS(app)
 
+session = requests.Session()
+
 HEADERS = {"Authorization": f"token {GITHUB_TOKEN}"} if GITHUB_TOKEN else {}
 
 LATEST_RESULT = {}
 LATEST_METRICS = {}
 LATEST_REPO_INFO = {}
 
-# ==================== HELPERS ====================
+# HELPERS
+
 def parse_repo_url(repo_url: str):
     parts = repo_url.rstrip("/").split("/")
     if len(parts) < 2:
@@ -36,32 +41,74 @@ def parse_repo_url(repo_url: str):
 
 def fetch_repo_contents(owner, repo, path=""):
     url = f"https://api.github.com/repos/{owner}/{repo}/contents/{path}"
-    r = requests.get(url, headers=HEADERS, timeout=15)
+    r = session.get(url, headers=HEADERS, timeout=15)
     r.raise_for_status()
     return r.json()
 
 def fetch_file_content(download_url):
-    r = requests.get(download_url, headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    return r.text
+    try:
+        r = session.get(download_url, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        return r.text
+    except:
+        return ""
+    
+def is_text_file(content):
+    try:
+        content.encode("utf-8")
+        return True
+    except:
+        return False
 
-def walk_repo(owner, repo, path=""):
-    items = fetch_repo_contents(owner, repo, path)
+def fetch_multiple_files(file_items):
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        return list(
+            executor.map(
+                lambda item: fetch_file_content(item.get("download_url", "")),
+                file_items
+            )
+        )
+
+def walk_repo(owner, repo, path="", depth=0, max_depth=5):
+    try:
+        items = fetch_repo_contents(owner, repo, path)
+    except:
+        return []
+
     files = []
+
     for item in items:
         if item["type"] == "file":
             files.append(item)
-        elif item["type"] == "dir":
-            files.extend(walk_repo(owner, repo, item["path"]))
+        elif item["type"] == "dir" and depth < max_depth:
+            files.extend(walk_repo(owner, repo, item["path"], depth + 1))
+
     return files
 
 def fetch_commits(owner, repo):
-    url = f"https://api.github.com/repos/{owner}/{repo}/commits"
-    r = requests.get(url, headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    return r.json()
+    url = f"https://api.github.com/repos/{owner}/{repo}/commits?per_page=1"
+    r = session.get(url, headers=HEADERS)
+    if "Link" in r.headers:
+       link = r.headers["Link"]
+       last_page = link.split("page=")[-1].split(">")[0]
+       return int(last_page)
+    return 1
 
-# ==================== ANALYSIS ====================
+
+def get_performance_level(score):
+
+    if score >= 80:
+        return "Best"
+
+    elif score >= 50:
+        return "Average"
+
+    else:
+        return "Needs Improvement"
+
+# ANALYSIS
+
+@lru_cache(maxsize=20)
 def analyze_repository(repo_url):
     owner, repo = parse_repo_url(repo_url)
     files = walk_repo(owner, repo)
@@ -76,7 +123,23 @@ def analyze_repository(repo_url):
         "languages": {}
     }
 
-    ext_to_lang = {".py": "Python", ".js": "JavaScript", ".ts": "TypeScript", ".css": "CSS", ".html": "HTML"}
+    ext_to_lang = {
+        ".py": "Python",
+        ".js": "JavaScript",
+        ".ts": "TypeScript",
+        ".css": "CSS",
+        ".html": "HTML",
+        ".java": "Java",
+        ".cpp": "C++",
+        ".c": "C",
+        ".go": "Go",
+        ".rs": "Rust",
+        ".php": "PHP",
+        ".rb": "Ruby",
+        ".kt": "Kotlin",
+        ".swift": "Swift"
+    }
+
     file_nodes = []
 
     for item in files:
@@ -85,31 +148,54 @@ def analyze_repository(repo_url):
 
         if lname.startswith("readme"):
             metrics["has_readme"] = True
+
         if "test" in lname:
             metrics["has_tests"] = True
 
-        if name.endswith(".py"):
-            code = fetch_file_content(item["download_url"])
-            metrics["lines"] += len(code.splitlines())
-            try:
-                tree = ast.parse(code)
-                metrics["functions"] += sum(isinstance(n, ast.FunctionDef) for n in ast.walk(tree))
-            except SyntaxError:
-                pass
-
-        file_nodes.append({"name": name, "type": item["type"], "path": item["path"]})
+        file_nodes.append({
+            "name": name,
+            "type": item["type"],
+            "path": item["path"]
+        })
 
         ext = os.path.splitext(name)[1]
         lang = ext_to_lang.get(ext)
         if lang:
             metrics["languages"][lang] = metrics["languages"].get(lang, 0) + 1
 
-    metrics["commit_count"] = len(fetch_commits(owner, repo))
+    contents = fetch_multiple_files(files)
+
+    for item, code in zip(files, contents):
+        if not code or not is_text_file(code):
+            continue
+
+        name = item["name"].lower()
+        metrics["lines"] += len(code.splitlines())
+
+        if name.startswith("readme"):
+            metrics["has_readme"] = True
+        if "test" in name:
+            metrics["has_tests"] = True
+
+        if name.endswith(".py"):
+            try:
+                tree = ast.parse(code)
+                metrics["functions"] += sum(
+                    isinstance(n, ast.FunctionDef) for n in ast.walk(tree)
+                )
+            except:
+                pass
+
+    metrics["commit_count"] = fetch_commits(owner, repo)
+
     total_files = sum(metrics["languages"].values()) or 1
-    metrics["languages"] = [{"name": k, "percentage": int(v / total_files * 100), "color": "#3178c6"} for k,v in metrics["languages"].items()]
+    metrics["languages"] = [
+        {"name": k, "percentage": int(v / total_files * 100), "color": "#3178c6"}
+        for k, v in metrics["languages"].items()
+    ]
+
     metrics["file_structure"] = file_nodes
 
-    # Save repo info for frontend
     LATEST_REPO_INFO.update({
         "owner": owner,
         "name": repo,
@@ -123,7 +209,8 @@ def analyze_repository(repo_url):
 
     return metrics
 
-# ==================== SCORING ====================
+# SCORING
+
 def calculate_scores(metrics):
     avg_func_size = metrics["lines"] / max(metrics["functions"], 1)
     code_quality = 90 if avg_func_size < 30 else 60
@@ -132,24 +219,33 @@ def calculate_scores(metrics):
     git_practices = min(metrics["commit_count"] * 5, 100)
     real_world = 75
 
-    final_score = int(0.25*code_quality + 0.15*documentation + 0.15*testing + 0.15*git_practices + 0.15*real_world)
+    final_score = int(
+        0.25 * code_quality
+        + 0.15 * documentation
+        + 0.15 * testing
+        + 0.15 * git_practices
+        + 0.15 * real_world
+    )
+
     breakdown = [
         {"label": "Code Quality", "score": code_quality},
         {"label": "Documentation", "score": documentation},
         {"label": "Testing", "score": testing},
         {"label": "Git Practices", "score": git_practices},
-        {"label": "Real-World Relevance", "score": real_world}
+        {"label": "Real-World Relevance", "score": real_world},
     ]
+
     return final_score, breakdown
 
-# ==================== AI HELPERS ====================
+# AI HELPERS
+
 def safe_json_from_ai(text):
     try:
         text = text.strip()
         start = text.find("{")
         end = text.rfind("}") + 1
         return json.loads(text[start:end])
-    except Exception:
+    except:
         return {}
 
 def generate_ai_summary(metrics, score):
@@ -179,13 +275,13 @@ Return strictly valid JSON:
     try:
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.3
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
         )
         return safe_json_from_ai(response.choices[0].message.content)
     except Exception as e:
         print("Groq summary error:", e)
-        return {"summary":"AI analysis unavailable.","strengths":[],"weaknesses":[]}
+        return {"summary": "AI analysis unavailable.", "strengths": [], "weaknesses": []}
 
 def generate_ai_roadmap(metrics):
     prompt = f"""
@@ -221,45 +317,51 @@ OUTPUT FORMAT:
     try:
         response = client.chat.completions.create(
             model="llama-3.1-8b-instant",
-            messages=[{"role":"user","content":prompt}],
-            temperature=0.3
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.3,
         )
         return safe_json_from_ai(response.choices[0].message.content)
     except Exception as e:
         print("Groq roadmap error:", e)
-        return {"short_term":[],"mid_term":[],"long_term":[]}
+        return {"short_term": [], "mid_term": [], "long_term": []}
 
+# RISK PREDICTION
 
-# ==================== RISK PREDICTION ====================
 def predict_risks(metrics):
     risks = {}
     risks["testing"] = "high" if not metrics["has_tests"] else "low"
     risks["documentation"] = "high" if not metrics["has_readme"] else "low"
-    risks["code_complexity"] = "high" if metrics["lines"]/max(metrics["functions"],1) > 50 else "low"
+    risks["code_complexity"] = "high" if metrics["lines"] / max(metrics["functions"], 1) > 50 else "low"
     risks["commit_risk"] = "medium" if metrics["commit_count"] < 5 else "low"
-    overall = sum([90 if v=="high" else 50 if v=="medium" else 10 for v in risks.values()])/len(risks)
+
+    overall = sum([90 if v == "high" else 50 if v == "medium" else 10 for v in risks.values()]) / len(risks)
     risks["overall_risk_score"] = int(overall)
+
     return risks
 
-# ==================== ROUTES ====================
+# ROUTES
+
 @app.route("/api/analyze", methods=["POST"])
 def analyze():
     global LATEST_RESULT, LATEST_METRICS
     repo_url = request.json.get("repo_url")
     if not repo_url:
-        return jsonify({"error":"repo_url required"}), 400
+        return jsonify({"error": "repo_url required"}), 400
+
     metrics = analyze_repository(repo_url)
     score, breakdown = calculate_scores(metrics)
     ai_summary = generate_ai_summary(metrics, score)
+
     LATEST_METRICS = metrics
     LATEST_RESULT = {
-        "score": score,
-        "summary": ai_summary.get("summary","AI analysis unavailable."),
-        "strengths": ai_summary.get("strengths",[]),
-        "weaknesses": ai_summary.get("weaknesses",[]),
-        "breakdown": breakdown
+    "score": score,
+    "performance": get_performance_level(score),
+    "summary": ai_summary.get("summary", "AI analysis unavailable."),
+    "strengths": ai_summary.get("strengths", []),
+    "weaknesses": ai_summary.get("weaknesses", []),
+    "breakdown": breakdown,
     }
-    return jsonify({"status":"analysis_complete"})
+    return jsonify({"status": "analysis_complete"})
 
 @app.route("/api/results")
 def results():
@@ -272,15 +374,16 @@ def roadmap():
 @app.route("/api/repo-details")
 def repo_details():
     if not LATEST_REPO_INFO:
-        return jsonify({"error":"No repository analyzed yet"}), 404
+        return jsonify({"error": "No repository analyzed yet"}), 404
     return jsonify(LATEST_REPO_INFO)
 
 @app.route("/api/risks")
 def risks():
     if not LATEST_METRICS:
-        return jsonify({"error":"No repository analyzed yet"}), 404
+        return jsonify({"error": "No repository analyzed yet"}), 404
     return jsonify(predict_risks(LATEST_METRICS))
 
-# ==================== RUN ====================
+# RUN
+
 if __name__ == "__main__":
-    app.run(debug=True,port=5000)
+    app.run(debug=True, port=5000)

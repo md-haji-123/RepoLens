@@ -43,12 +43,12 @@ const Index = () => {
           </h1>
 
           <p className="text-xl md:text-2xl text-muted-foreground mb-4 animate-in-delay-2 max-w-3xl mx-auto">
-            AI-Powered GitHub Repository Evaluation
+            AI-Powered GitHub Repository Intelligence
           </p>
 
           <p className="text-lg text-muted-foreground/80 mb-12 animate-in-delay-2 max-w-2xl mx-auto">
-            Turn GitHub repos into scores, insights, and improvement roadmaps.
-            Get actionable feedback to level up your code.
+            Turn GitHub repositories into scores, insights, 
+            and improvement roadmaps — powered by AI.
           </p>
 
           <div className="flex flex-col sm:flex-row items-center justify-center gap-4 animate-in-delay-3">
@@ -126,7 +126,7 @@ const Index = () => {
             <span className="font-semibold text-foreground">RepoLens</span>
           </div>
           <p className="text-sm text-muted-foreground">
-            © 2024 RepoLens. Built with AI for developers.
+           © 2025 RepoLens — Turning repositories into intelligence.
           </p>
         </div>
       </footer>

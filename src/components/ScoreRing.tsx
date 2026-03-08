@@ -18,10 +18,10 @@ const ScoreRing = ({ score, size = 200, strokeWidth = 12 }: ScoreRingProps) => {
     return 'hsl(var(--score-bronze))';
   };
 
-  const getSkillLevel = () => {
-    if (score >= 80) return 'Advanced';
-    if (score >= 60) return 'Intermediate';
-    return 'Beginner';
+ const getSkillLevel = () => {
+    if (score >= 80) return 'Elite Repository';
+    if (score >= 50) return 'Stable Repository';
+    return 'Needs Optimization';
   };
 
   const getBadge = () => {
