@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import AnimatedBackground from "@/components/AnimatedBackground";
 import Navbar from "@/components/Navbar";
 import ScoreRing from "@/components/ScoreRing";
+
 import axios from "axios";
 
 const Results = () => {
@@ -129,6 +130,8 @@ const Results = () => {
               ))}
             </div>
           </div>
+
+        
 
           {/* CTA */}
           <div
